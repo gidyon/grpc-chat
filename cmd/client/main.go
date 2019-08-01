@@ -3,17 +3,20 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"github.com/Sirupsen/logrus"
-	chat "github.com/gidyon/grpc/chat/api"
+	"github.com/gidyon/grpc/chat/api"
 	"google.golang.org/grpc"
 	"os"
 	"strings"
-	"sync"
 )
 
 func main() {
-	cc, err := grpc.Dial(":9090", grpc.WithInsecure())
+	url := flag.String("url", "localhost:9090", "url of the chat server")
+	flag.Parse()
+
+	cc, err := grpc.Dial(*url, grpc.WithInsecure())
 	if err != nil {
 		logrus.Fatal(err)
 	}
@@ -43,40 +46,26 @@ prompt:
 	if err = chatRoom.Send(&chat.ChatMessage{
 		UserName: name,
 	}); err != nil {
-		logrus.Warn(err.Error())
+		logrus.Warnf("%s\n Please try again", err.Error())
 		count++
 		goto prompt
 	}
-
-	wg := &sync.WaitGroup{}
-	wg.Add(2)
 
 	startReceiving := make(chan struct{}, 0)
 
 	// Sending messages
 	go func() {
-		defer func() {
-			cancel()
-			wg.Done()
-		}()
-
 		// Send signal to receiver
 		close(startReceiving)
 
-		// Start receiving and sending chats
+		// Get os input and send to chats
 		for s.Scan() {
-
-			msg := s.Text()
-			if strings.ToLower(msg) == "quit" {
-				return
-			}
-
 			select {
 			case <-ctx.Done():
 				return
 			default:
 				err = chatRoom.Send(&chat.ChatMessage{
-					Message:  msg,
+					Message:  s.Text(),
 					UserName: name,
 				})
 				if err != nil {
@@ -87,35 +76,25 @@ prompt:
 		}
 	}()
 
-	// Receiving messages
-	go func() {
-		defer func() {
-			cancel()
-			wg.Done()
-		}()
+	// Proceed only when signaled
+	<-startReceiving
 
-		// Proceed only when signaled
-		<-startReceiving
-
-		for {
-			msg, err := chatRoom.Recv()
-			if err != nil {
-				return
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if strings.HasPrefix(msg.Message, name) {
-					msg.Message = fmt.Sprintf("you%s", strings.TrimPrefix(msg.Message, name))
-				}
-				fmt.Fprint(os.Stdout, msg.Message)
-			}
+	for {
+		msg, err := chatRoom.Recv()
+		if err != nil {
+			logrus.Errorf("exiting chat: %v", err)
+			return
 		}
-	}()
 
-	// Wait
-	wg.Wait()
-	logrus.Infoln("exiting chat...")
+		select {
+		case <-ctx.Done():
+			logrus.Errorf("exiting chat: %v", err)
+			return
+		default:
+			if strings.HasPrefix(msg.Message, name) {
+				msg.Message = fmt.Sprintf("you%s", strings.TrimPrefix(msg.Message, name))
+			}
+			fmt.Fprint(os.Stdout, msg.Message)
+		}
+	}
 }
