@@ -1,11 +1,13 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"github.com/Sirupsen/logrus"
 	"github.com/gidyon/grpc/chat/api"
-	"github.com/pkg/errors"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"net"
 	"strings"
 	"sync"
@@ -14,15 +16,20 @@ import (
 func main() {
 	s := grpc.NewServer()
 
+	// Create chat room
 	chatSRV := &chatRoomDS{
 		members: make(map[string]chat.ChatRoom_ChatServer, 0),
 		chats:   make(chan string, 0),
 	}
-	go chatSRV.worker()
+	// Handle streaming messages
+	go chatSRV.run()
 
 	chat.RegisterChatRoomServer(s, chatSRV)
 
-	lis, err := net.Listen("tcp", ":9090")
+	port := flag.String("port", ":9090", "port server is running")
+	flag.Parse()
+
+	lis, err := net.Listen("tcp", *port)
 	if err != nil {
 		logrus.Fatal(err)
 	}
@@ -38,50 +45,59 @@ type chatRoomDS struct {
 }
 
 func (chatSRV *chatRoomDS) Chat(chatRoom chat.ChatRoom_ChatServer) error {
-	// First message is used for registration
+	// First message is used for registration and authentication
 	msg, err := chatRoom.Recv()
 	if err != nil {
-		return err
+		return status.Errorf(codes.OutOfRange, "couldn't receive message: %v", err)
 	}
-	if strings.Trim(msg.UserName, " ") == "" {
-		return errors.New("empty username")
+
+	if strings.TrimSpace(msg.UserName) == "" {
+		return status.Error(codes.InvalidArgument, "missing user name")
 	}
 
 	chatSRV.mu.Lock()
 
 	// Check username is not taken
 	if _, ok := chatSRV.members[msg.UserName]; ok {
-		return errors.New("username is taken")
+		return status.Error(codes.ResourceExhausted, "username is taken")
 	}
 
-	// Add to members
+	// Add to caht members
 	chatSRV.members[msg.UserName] = chatRoom
 
 	chatSRV.mu.Unlock()
 
-	// Send join message
-	select {
-	case <-chatRoom.Context().Done():
-		return chatRoom.Context().Err()
-	case chatSRV.chats <- fmt.Sprintf("%s joined chat\n", msg.UserName):
-	}
-
-	// Subsequent chats messages they sent
-	for {
-		msg, err = chatRoom.Recv()
-		if err != nil {
-			return err
-		}
-
+	broadCastMsg := func(msg string) error {
 		select {
 		case <-chatRoom.Context().Done():
 			return chatRoom.Context().Err()
-		case chatSRV.chats <- fmt.Sprintf("%s: %s\n", msg.UserName, msg.Message):
+		case chatSRV.chats <- fmt.Sprintf("%s joined chat\n", msg):
+		}
+		return nil
+	}
+
+	// Broadcast join message to all members
+	broadCastMsg(fmt.Sprintf("%s joined chat\n", msg.UserName))
+	if err != nil {
+		return err
+	}
+
+	// Handle subsequent chats messages this member will send
+	for {
+		msg, err = chatRoom.Recv()
+		if err != nil {
+			return status.Errorf(codes.OutOfRange, "couldn't receive message: %v", err)
+		}
+
+		// Broadcast join message to all members
+		broadCastMsg(fmt.Sprintf("%s: %s\n", msg.UserName, msg.Message))
+		if err != nil {
+			return err
 		}
 	}
 }
 
-func (chatSRV *chatRoomDS) worker() {
+func (chatSRV *chatRoomDS) run() {
 	var err error
 	for msg := range chatSRV.chats {
 		chatMsg := &chat.ChatMessage{
