@@ -44,7 +44,27 @@ type chatRoomDS struct {
 	chats   chan string
 }
 
+func (chatSRV *chatRoomDS) broadCastMsg(chatRoom chat.ChatRoom_ChatServer, msg string) error {
+	select {
+	case <-chatRoom.Context().Done():
+		return chatRoom.Context().Err()
+	case chatSRV.chats <- msg:
+	}
+	return nil
+}
+
 func (chatSRV *chatRoomDS) Chat(chatRoom chat.ChatRoom_ChatServer) error {
+	var userName string
+
+	// Defer leave chat
+	defer func() {
+		chatSRV.broadCastMsg(chatRoom, fmt.Sprintf("%s left chat\n", userName))
+		// Remove from chat members
+		chatSRV.mu.Lock()
+		delete(chatSRV.members, userName)
+		chatSRV.mu.Unlock()
+	}()
+
 	// First message is used for registration and authentication
 	msg, err := chatRoom.Recv()
 	if err != nil {
@@ -55,29 +75,23 @@ func (chatSRV *chatRoomDS) Chat(chatRoom chat.ChatRoom_ChatServer) error {
 		return status.Error(codes.InvalidArgument, "missing user name")
 	}
 
+	// Update username
+	userName = msg.UserName
+
 	chatSRV.mu.Lock()
 
 	// Check username is not taken
-	if _, ok := chatSRV.members[msg.UserName]; ok {
+	if _, ok := chatSRV.members[userName]; ok {
 		return status.Error(codes.ResourceExhausted, "username is taken")
 	}
 
-	// Add to caht members
-	chatSRV.members[msg.UserName] = chatRoom
+	// Add to chat members
+	chatSRV.members[userName] = chatRoom
 
 	chatSRV.mu.Unlock()
 
-	broadCastMsg := func(msg string) error {
-		select {
-		case <-chatRoom.Context().Done():
-			return chatRoom.Context().Err()
-		case chatSRV.chats <- fmt.Sprintf("%s joined chat\n", msg):
-		}
-		return nil
-	}
-
 	// Broadcast join message to all members
-	broadCastMsg(fmt.Sprintf("%s joined chat\n", msg.UserName))
+	chatSRV.broadCastMsg(chatRoom, fmt.Sprintf("%s joined chat\n", userName))
 	if err != nil {
 		return err
 	}
@@ -90,7 +104,7 @@ func (chatSRV *chatRoomDS) Chat(chatRoom chat.ChatRoom_ChatServer) error {
 		}
 
 		// Broadcast join message to all members
-		broadCastMsg(fmt.Sprintf("%s: %s\n", msg.UserName, msg.Message))
+		chatSRV.broadCastMsg(chatRoom, fmt.Sprintf("%s: %s\n", userName, msg.Message))
 		if err != nil {
 			return err
 		}
