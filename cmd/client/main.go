@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	url := flag.String("url", "localhost:9090", "url of the chat server")
+	url := flag.String("url", "passthrough:///localhost:9090", "url of the chat server")
 	flag.Parse()
 
 	cc, err := grpc.Dial(*url, grpc.WithInsecure())
